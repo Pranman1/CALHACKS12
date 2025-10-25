@@ -3,16 +3,60 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-try:
-    from isaaclab.utils.math import quat_apply_inverse
-except ImportError:
-    from isaaclab.utils.math import quat_rotate_inverse as quat_apply_inverse
-from isaaclab.assets import Articulation, RigidObject
-from isaaclab.managers import SceneEntityCfg
-from isaaclab.sensors import ContactSensor
-
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.managers import SceneEntityCfg
+    from isaaclab.sensors import ContactSensor
+
+# Try to import Isaac Lab modules, but don't fail if they're not available
+try:
+    from isaaclab.utils.math import quat_apply_inverse, quat_rotate_vector
+except ImportError:
+    try:
+        from isaaclab.utils.math import quat_rotate_inverse as quat_apply_inverse
+        from isaaclab.utils.math import quat_rotate_vector
+    except ImportError:
+        quat_apply_inverse = None
+        quat_rotate_vector = None
+
+try:
+    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.managers import SceneEntityCfg
+    from isaaclab.sensors import ContactSensor
+except ImportError:
+    # Define dummy classes if imports fail
+    class Articulation:
+        pass
+    class RigidObject:
+        pass
+    class SceneEntityCfg:
+        def __init__(self, *args, **kwargs):
+            pass
+    class ContactSensor:
+        pass
+
+__all__ = [
+    "energy",
+    "stand_still",
+    "orientation_l2",
+    "upward",
+    "joint_position_penalty",
+    "feet_stumble",
+    "feet_height_body",
+    "foot_clearance_reward",
+    "feet_too_near",
+    "feet_contact_without_cmd",
+    "air_time_variance_penalty",
+    "feet_gait",
+    "joint_mirror",
+    "robot_skateboard_alignment",
+    "skateboard_orientation",
+    "feet_on_skateboard",
+    "robot_skateboard_contact",
+    "feet_near_skateboard_centerline",
+    "com_within_support_polygon",
+]
 
 """
 Joint penalties.
@@ -322,3 +366,165 @@ def robot_skateboard_contact(
     num_feet_in_contact = torch.sum(is_contact.float(), dim=-1)
     
     return num_feet_in_contact / len(sensor_cfg.body_ids)
+
+
+def feet_near_skateboard_centerline(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+    max_distance: float = 0.15,
+) -> torch.Tensor:
+    """Reward feet being near the centerline of the skateboard (along long axis).
+    
+    Computes perpendicular distance from each foot to the skateboard's centerline
+    (the line running along its length). This encourages proper stance with feet
+    centered on the board width, preventing tipping left/right.
+    
+    The skateboard can rotate, so we use its actual orientation to compute the
+    centerline direction in world frame.
+    
+    Uses exponential decay: reward = exp(-perpendicular_distance / max_distance)
+    - Feet on centerline = max reward (1.0)
+    - Feet at max_distance = ~0.37 reward
+    - Feet far from centerline = minimal reward
+    
+    Args:
+        env: The environment.
+        robot_cfg: Robot body configuration (feet).
+        skateboard_cfg: Skateboard configuration.
+        max_distance: Perpendicular distance at which reward decays to ~37% (meters).
+        
+    Returns:
+        Reward tensor (num_envs,) with exponential decay based on perpendicular distance.
+    """
+    # Get assets
+    robot: Articulation = env.scene[robot_cfg.name]
+    skateboard: Articulation = env.scene[skateboard_cfg.name]
+    
+    # Get foot bodies
+    foot_ids, _ = robot_cfg.body_ids_with_body_names[0]
+    
+    # Foot positions (world frame)
+    foot_pos_w = robot.data.body_pos_w[:, foot_ids, :]  # (num_envs, num_feet, 3)
+    
+    # Skateboard center and orientation (world frame)
+    skateboard_pos_w = skateboard.data.root_pos_w  # (num_envs, 3)
+    skateboard_quat_w = skateboard.data.root_quat_w  # (num_envs, 4) - (w, x, y, z)
+    
+    # Get skateboard's forward direction (long axis) in world frame
+    # Assuming the skateboard's local X-axis is the long axis
+    # Forward vector in local frame: [1, 0, 0]
+    forward_local = torch.tensor([1.0, 0.0, 0.0], device=env.device).repeat(env.num_envs, 1)  # (num_envs, 3)
+    
+    # Rotate forward vector to world frame using quaternion
+    forward_w = quat_rotate_vector(skateboard_quat_w, forward_local)  # (num_envs, 3)
+    
+    # For each foot, compute perpendicular distance to centerline
+    # Vector from skateboard center to foot (XY plane only)
+    foot_to_skateboard = foot_pos_w[..., :2] - skateboard_pos_w[:, None, :2]  # (num_envs, num_feet, 2)
+    
+    # Skateboard forward direction (XY plane only, normalized)
+    forward_xy = forward_w[:, :2]  # (num_envs, 2)
+    forward_xy = forward_xy / (torch.norm(forward_xy, dim=-1, keepdim=True) + 1e-6)  # Normalize
+    
+    # Project foot_to_skateboard onto forward direction (parallel component)
+    # parallel_distance = dot(foot_to_skateboard, forward_xy)
+    parallel_distance = torch.sum(
+        foot_to_skateboard * forward_xy[:, None, :], dim=-1
+    )  # (num_envs, num_feet)
+    
+    # Parallel vector component
+    parallel_vec = parallel_distance.unsqueeze(-1) * forward_xy[:, None, :]  # (num_envs, num_feet, 2)
+    
+    # Perpendicular vector component (distance from centerline - minimize this!)
+    perpendicular_vec = foot_to_skateboard - parallel_vec  # (num_envs, num_feet, 2)
+    perpendicular_distance = torch.norm(perpendicular_vec, dim=-1)  # (num_envs, num_feet)
+    
+    # Exponential decay reward based on perpendicular distance
+    reward_per_foot = torch.exp(-perpendicular_distance / max_distance)  # (num_envs, num_feet)
+    
+    # Average over both feet
+    return torch.mean(reward_per_foot, dim=-1)  # (num_envs,)
+
+
+def com_within_support_polygon(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    feet_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+    margin: float = 0.05,
+) -> torch.Tensor:
+    """Reward for keeping the robot's center of mass (CoM) projection within the support polygon.
+    
+    This is a fundamental principle of bipedal balance:
+    - CoM projection inside support polygon (between feet) = stable
+    - CoM projection outside support polygon = falling/unstable
+    
+    For skateboarding, this ensures the robot maintains proper weight distribution
+    and doesn't lean too far in any direction, which would cause tipping.
+    
+    The reward is highest when CoM is well within the support polygon (with margin),
+    and decreases as it approaches or exceeds the polygon boundaries.
+    
+    Args:
+        env: The environment.
+        robot_cfg: Robot configuration (for CoM).
+        feet_cfg: Feet body configuration (defines support polygon).
+        margin: Safety margin inside support polygon for max reward (meters).
+        
+    Returns:
+        Reward tensor (num_envs,) between 0 and 1.
+    """
+    # Get assets
+    robot: Articulation = env.scene[robot_cfg.name]
+    
+    # Get foot bodies
+    foot_ids, _ = feet_cfg.body_ids_with_body_names[0]
+    
+    # Center of mass position (world frame, XY only)
+    com_pos_w = robot.data.root_pos_w[:, :2]  # (num_envs, 2) - using base as proxy for CoM
+    
+    # Foot positions (world frame, XY only)
+    feet_pos_w = robot.data.body_pos_w[:, foot_ids, :2]  # (num_envs, num_feet, 2)
+    
+    # Compute support polygon boundaries
+    # For 2 feet, support polygon is a line segment between the feet
+    # Distance from CoM to this line segment determines stability
+    
+    # Midpoint between feet (center of support)
+    feet_center = torch.mean(feet_pos_w, dim=1)  # (num_envs, 2)
+    
+    # Vector between feet
+    feet_vec = feet_pos_w[:, 1, :] - feet_pos_w[:, 0, :]  # (num_envs, 2)
+    feet_dist = torch.norm(feet_vec, dim=-1, keepdim=True) + 1e-6  # (num_envs, 1)
+    feet_dir = feet_vec / feet_dist  # Normalized direction between feet
+    
+    # Vector from feet center to CoM
+    com_to_center = com_pos_w - feet_center  # (num_envs, 2)
+    
+    # Project CoM onto line between feet (parallel component)
+    parallel_dist = torch.sum(com_to_center * feet_dir, dim=-1, keepdim=True)  # (num_envs, 1)
+    
+    # Perpendicular distance from CoM to line between feet
+    parallel_vec = parallel_dist * feet_dir  # (num_envs, 2)
+    perpendicular_vec = com_to_center - parallel_vec  # (num_envs, 2)
+    perpendicular_dist = torch.norm(perpendicular_vec, dim=-1)  # (num_envs,)
+    
+    # Check if CoM is within the line segment (not beyond either foot)
+    half_feet_dist = feet_dist.squeeze(-1) / 2.0  # (num_envs,)
+    parallel_dist = parallel_dist.squeeze(-1).abs()  # (num_envs,)
+    
+    # Distance from support polygon boundary
+    # If within line segment: distance is perpendicular_dist
+    # If beyond line segment: distance is sqrt(perpendicular^2 + (parallel - half_feet)^2)
+    beyond_feet = parallel_dist - half_feet_dist
+    beyond_feet = torch.clamp(beyond_feet, min=0.0)  # (num_envs,) - 0 if within, positive if beyond
+    
+    total_dist = torch.sqrt(perpendicular_dist ** 2 + beyond_feet ** 2)  # (num_envs,)
+    
+    # Reward function:
+    # - Inside margin: reward = 1.0
+    # - At margin: reward = 0.37 (exp(-1))
+    # - Outside: exponentially decreasing
+    reward = torch.exp(-total_dist / margin)  # (num_envs,)
+    
+    return reward

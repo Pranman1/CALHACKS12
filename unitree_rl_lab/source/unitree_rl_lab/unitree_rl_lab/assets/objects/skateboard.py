@@ -10,7 +10,7 @@ from isaaclab.assets import RigidObjectCfg
 from isaaclab.utils import configclass
 
 # Path to skateboard URDF
-SKATEBOARD_URDF_PATH = "/home/prantheman/CALHACK/CALHACKS12/unitree_rl_lab/assets/urdf/skateboard/skateboard.urdf"
+SKATEBOARD_URDF_PATH = "unitree_rl_lab/assets/urdf/skateboard/skateboard.urdf"
 
 
 @configclass

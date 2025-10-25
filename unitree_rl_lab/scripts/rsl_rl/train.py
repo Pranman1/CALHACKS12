@@ -13,8 +13,10 @@ import pathlib
 import sys
 
 sys.path.insert(0, f"{pathlib.Path(__file__).parent.parent}")
+sys.path.insert(0, f"{pathlib.Path(__file__).parent.parent}/source")
 from list_envs import import_packages  # noqa: F401
 
+sys.path.pop(0)
 sys.path.pop(0)
 
 tasks = []

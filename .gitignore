@@ -1,0 +1,24 @@
+# Logs directory - contains large training files
+logs/
+outputs/
+
+# RL training logs
+**/logs/*
+**/outputs/*
+
+# Model checkpoints
+*.pt
+
+# Large diff files
+*.diff
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+

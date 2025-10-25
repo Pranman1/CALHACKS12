@@ -17,8 +17,71 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_CFG as ROBOT_CFG
-from unitree_rl_lab.assets.objects.skateboard import SKATEBOARD_CFG
 from unitree_rl_lab.tasks.locomotion import mdp
+
+# Import skateboard-specific functions - direct imports
+from unitree_rl_lab.tasks.locomotion.mdp.observations import (
+    robot_skateboard_relative_position,
+    robot_skateboard_xy_distance,
+    skateboard_orientation_body_frame,
+    feet_skateboard_relative_height,
+)
+from unitree_rl_lab.tasks.locomotion.mdp.rewards import (
+    robot_skateboard_alignment,
+    skateboard_orientation,
+    feet_on_skateboard,
+    robot_skateboard_contact,
+    feet_near_skateboard_centerline,
+    com_within_support_polygon,
+)
+from unitree_rl_lab.tasks.locomotion.mdp.terminations import (
+    robot_off_skateboard,
+    feet_off_skateboard,
+    skateboard_tilted,
+)
+
+# Define skateboard configuration using URDF
+import os
+# This file is at: unitree_rl_lab/source/unitree_rl_lab/unitree_rl_lab/tasks/locomotion/robots/g1/29dof/skate_env_cfg.py
+# Need to go up to unitree_rl_lab root, then into assets
+SKATEBOARD_URDF_PATH = os.path.join(
+    os.path.dirname(__file__), 
+    "..", "..", "..", "..", "..", "..", "..", "..", "assets", "robots", "skateboard_description", "urdf", "skateboard.urdf"
+)
+SKATEBOARD_URDF_PATH = os.path.abspath(SKATEBOARD_URDF_PATH)
+
+SKATEBOARD_CFG = ArticulationCfg(
+    prim_path="{ENV_REGEX_NS}/Skateboard",
+    spawn=sim_utils.UrdfFileCfg(
+        asset_path=SKATEBOARD_URDF_PATH,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            max_depenetration_velocity=1.0,
+            retain_accelerations=False,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False,
+            solver_position_iteration_count=4,
+            solver_velocity_iteration_count=0,
+        ),
+        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+            drive_type="force",
+            target_type="position",
+            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+                stiffness=0.0,
+                damping=0.0,
+            ),
+        ),
+        fix_base=False,  # Allow skateboard to move
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.05),  # Slightly above ground
+        rot=(1.0, 0.0, 0.0, 0.0),  # Flat orientation (w, x, y, z quaternion)
+        lin_vel=(0.0, 0.0, 0.0),  # Stationary
+        ang_vel=(0.0, 0.0, 0.0),  # No rotation
+    ),
+    actuators={},  # No actuators for skateboard
+)
 
 
 @configclass
@@ -45,13 +108,14 @@ class SkateboardSceneCfg(InteractiveSceneCfg):
     )
 
     # skateboard - stationary
-    skateboard: RigidObjectCfg = SKATEBOARD_CFG
+    skateboard: ArticulationCfg = SKATEBOARD_CFG
 
-    # robot - starts on skateboard
+    # robot - starts on skateboard, rotated 90 degrees (parallel to skateboard length)
     robot: ArticulationCfg = ROBOT_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.90),  # Higher up to be on skateboard (adjust as needed)
+            rot=(0.7071, 0.0, 0.0, 0.7071),  # 90 degree rotation around Z-axis (w, x, y, z quaternion)
             joint_pos={
                 "left_hip_pitch_joint": -0.1,
                 "right_hip_pitch_joint": -0.1,
@@ -137,6 +201,23 @@ class EventCfg:
             "velocity_range": (0.0, 0.0),
         },
     )
+    
+    reset_skateboard = EventTerm(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0)},
+            "velocity_range": {
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
+            },
+            "asset_cfg": SceneEntityCfg("skateboard"),
+        },
+    )
 
 
 @configclass
@@ -165,7 +246,7 @@ class ObservationsCfg:
         
         # skateboard-specific observations
         skateboard_relative_pos = ObsTerm(
-            func=mdp.robot_skateboard_relative_position,
+            func=robot_skateboard_relative_position,
             noise=Unoise(n_min=-0.02, n_max=0.02),
             params={
                 "robot_cfg": SceneEntityCfg("robot"),
@@ -173,7 +254,7 @@ class ObservationsCfg:
             },
         )
         skateboard_xy_distance = ObsTerm(
-            func=mdp.robot_skateboard_xy_distance,
+            func=robot_skateboard_xy_distance,
             params={
                 "robot_cfg": SceneEntityCfg("robot"),
                 "skateboard_cfg": SceneEntityCfg("skateboard"),
@@ -201,21 +282,21 @@ class ObservationsCfg:
         
         # skateboard-specific observations (privileged)
         skateboard_relative_pos = ObsTerm(
-            func=mdp.robot_skateboard_relative_position,
+            func=robot_skateboard_relative_position,
             params={
                 "robot_cfg": SceneEntityCfg("robot"),
                 "skateboard_cfg": SceneEntityCfg("skateboard"),
             },
         )
         skateboard_xy_distance = ObsTerm(
-            func=mdp.robot_skateboard_xy_distance,
+            func=robot_skateboard_xy_distance,
             params={
                 "robot_cfg": SceneEntityCfg("robot"),
                 "skateboard_cfg": SceneEntityCfg("skateboard"),
             },
         )
         feet_skateboard_height = ObsTerm(
-            func=mdp.feet_skateboard_relative_height,
+            func=feet_skateboard_relative_height,
             params={
                 "robot_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
                 "skateboard_cfg": SceneEntityCfg("skateboard"),
@@ -234,13 +315,13 @@ class RewardsCfg:
     """Reward terms for the MDP - focused on stationary skateboard balancing."""
 
     # -- primary task: stay balanced on skateboard
-    stay_upright = RewTerm(func=mdp.flat_orientation_l2, weight=-10.0)
-    base_height = RewTerm(func=mdp.base_height_l2, weight=-10.0, params={"target_height": 0.90})
-    alive = RewTerm(func=mdp.is_alive, weight=1.0)
+    stay_upright = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)  # Reduced from -10.0
+    base_height = RewTerm(func=mdp.base_height_l2, weight=-2.5, params={"target_height": 0.90})  # Reduced from -5.0
+    alive = RewTerm(func=mdp.is_alive, weight=10.0)  # Increased from 5.0
 
     # -- penalties for movement (we want robot to stay still on stationary skateboard)
     base_linear_velocity_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
-    base_linear_velocity_xy = RewTerm(func=mdp.base_lin_vel_xy_l2, weight=-1.0)
+    # Use joint_vel_l2 as a proxy for base XY velocity penalty (standard function doesn't exist)
     base_angular_velocity = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.5)
 
     # -- smooth motion
@@ -292,19 +373,37 @@ class RewardsCfg:
 
     # -- skateboard-specific rewards
     robot_on_skateboard = RewTerm(
-        func=mdp.robot_skateboard_alignment,
-        weight=5.0,
+        func=robot_skateboard_alignment,
+        weight=10.0,  # Increased from 5.0
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "skateboard_cfg": SceneEntityCfg("skateboard"),
         },
     )
     feet_on_skateboard = RewTerm(
-        func=mdp.feet_on_skateboard,
-        weight=2.0,
+        func=feet_on_skateboard,
+        weight=5.0,  # Increased from 2.0
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
             "skateboard_cfg": SceneEntityCfg("skateboard"),
+        },
+    )
+    feet_centerline = RewTerm(
+        func=feet_near_skateboard_centerline,
+        weight=20.0,  # Strong reward for proper foot placement
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+            "skateboard_cfg": SceneEntityCfg("skateboard"),
+            "max_distance": 0.15,  # 15cm tolerance from centerline
+        },
+    )
+    com_projection = RewTerm(
+        func=com_within_support_polygon,
+        weight=15.0,  # Critical for balance stability
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "feet_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+            "margin": 0.05,  # 5cm margin inside support polygon
         },
     )
 
@@ -319,7 +418,7 @@ class TerminationsCfg:
     
     # skateboard-specific constraints
     robot_off_skateboard = DoneTerm(
-        func=mdp.robot_off_skateboard,
+        func=robot_off_skateboard,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "skateboard_cfg": SceneEntityCfg("skateboard"),
@@ -327,7 +426,7 @@ class TerminationsCfg:
         },
     )
     feet_off_skateboard = DoneTerm(
-        func=mdp.feet_off_skateboard,
+        func=feet_off_skateboard,
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
             "skateboard_cfg": SceneEntityCfg("skateboard"),

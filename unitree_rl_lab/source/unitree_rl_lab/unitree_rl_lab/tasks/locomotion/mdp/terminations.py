@@ -3,11 +3,30 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-from isaaclab.assets import Articulation, RigidObject
-from isaaclab.managers import SceneEntityCfg
-
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.managers import SceneEntityCfg
+
+# Try to import Isaac Lab modules, but don't fail if they're not available
+try:
+    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.managers import SceneEntityCfg
+except ImportError:
+    # Define dummy classes if imports fail
+    class Articulation:
+        pass
+    class RigidObject:
+        pass
+    class SceneEntityCfg:
+        def __init__(self, *args, **kwargs):
+            pass
+
+__all__ = [
+    "robot_off_skateboard",
+    "feet_off_skateboard",
+    "skateboard_tilted",
+]
 
 
 """

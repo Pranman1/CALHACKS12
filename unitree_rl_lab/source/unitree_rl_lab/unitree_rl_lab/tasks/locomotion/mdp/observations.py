@@ -3,16 +3,18 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-try:
-    from isaaclab.utils.math import quat_apply_inverse
-except ImportError:
-    from isaaclab.utils.math import quat_rotate_inverse as quat_apply_inverse
-
-from isaaclab.assets import Articulation, RigidObject
-from isaaclab.managers import SceneEntityCfg
-
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.managers import SceneEntityCfg
+
+__all__ = [
+    "gait_phase",
+    "robot_skateboard_relative_position",
+    "robot_skateboard_xy_distance",
+    "skateboard_orientation_body_frame",
+    "feet_skateboard_relative_height",
+]
 
 
 def gait_phase(env: ManagerBasedRLEnv, period: float) -> torch.Tensor:
@@ -34,14 +36,27 @@ Skateboard-specific observations.
 
 def robot_skateboard_relative_position(
     env: ManagerBasedRLEnv,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+    robot_cfg: "SceneEntityCfg" = None,
+    skateboard_cfg: "SceneEntityCfg" = None,
 ) -> torch.Tensor:
     """Relative position of robot base to skateboard center (in robot's frame).
     
     Returns 3D position vector (x, y, z) of skateboard relative to robot base.
     This tells the robot where the skateboard is beneath it.
     """
+    # Import locally to avoid import issues during module loading
+    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.managers import SceneEntityCfg
+    try:
+        from isaaclab.utils.math import quat_apply_inverse
+    except ImportError:
+        from isaaclab.utils.math import quat_rotate_inverse as quat_apply_inverse
+    
+    if robot_cfg is None:
+        robot_cfg = SceneEntityCfg("robot")
+    if skateboard_cfg is None:
+        skateboard_cfg = SceneEntityCfg("skateboard")
+    
     robot: Articulation = env.scene[robot_cfg.name]
     skateboard: RigidObject = env.scene[skateboard_cfg.name]
     
@@ -56,13 +71,22 @@ def robot_skateboard_relative_position(
 
 def robot_skateboard_xy_distance(
     env: ManagerBasedRLEnv,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+    robot_cfg: "SceneEntityCfg" = None,
+    skateboard_cfg: "SceneEntityCfg" = None,
 ) -> torch.Tensor:
     """Horizontal (XY) distance between robot and skateboard center.
     
     Returns scalar distance. Robot should keep this near zero to stay centered.
     """
+    # Import locally to avoid import issues during module loading
+    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.managers import SceneEntityCfg
+    
+    if robot_cfg is None:
+        robot_cfg = SceneEntityCfg("robot")
+    if skateboard_cfg is None:
+        skateboard_cfg = SceneEntityCfg("skateboard")
+    
     robot: Articulation = env.scene[robot_cfg.name]
     skateboard: RigidObject = env.scene[skateboard_cfg.name]
     
@@ -75,25 +99,41 @@ def robot_skateboard_xy_distance(
 
 def skateboard_orientation_body_frame(
     env: ManagerBasedRLEnv,
-    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+    skateboard_cfg: "SceneEntityCfg" = None,
 ) -> torch.Tensor:
     """Skateboard's projected gravity in its own body frame.
     
     Tells robot if skateboard is tilting. Should be (0, 0, -1) when level.
     """
+    # Import locally to avoid import issues during module loading
+    from isaaclab.assets import RigidObject
+    from isaaclab.managers import SceneEntityCfg
+    
+    if skateboard_cfg is None:
+        skateboard_cfg = SceneEntityCfg("skateboard")
+    
     skateboard: RigidObject = env.scene[skateboard_cfg.name]
     return skateboard.data.projected_gravity_b
 
 
 def feet_skateboard_relative_height(
     env: ManagerBasedRLEnv,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
-    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+    robot_cfg: "SceneEntityCfg" = None,
+    skateboard_cfg: "SceneEntityCfg" = None,
 ) -> torch.Tensor:
     """Height of robot feet relative to skateboard top surface.
     
     Returns height difference for each foot. Should be near zero when feet on skateboard.
     """
+    # Import locally to avoid import issues during module loading
+    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.managers import SceneEntityCfg
+    
+    if robot_cfg is None:
+        robot_cfg = SceneEntityCfg("robot", body_names=".*ankle_roll.*")
+    if skateboard_cfg is None:
+        skateboard_cfg = SceneEntityCfg("skateboard")
+    
     robot: Articulation = env.scene[robot_cfg.name]
     skateboard: RigidObject = env.scene[skateboard_cfg.name]
     
