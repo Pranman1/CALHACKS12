@@ -1,0 +1,3 @@
+[submodule "unitree_rl_lab/unitree_ros"]
+	path = unitree_rl_lab/unitree_ros
+	url = https://github.com/unitreerobotics/unitree_ros.git
