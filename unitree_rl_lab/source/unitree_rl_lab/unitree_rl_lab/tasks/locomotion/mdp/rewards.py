@@ -223,3 +223,102 @@ def joint_mirror(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, mirror_joint
         )
     reward *= 1 / len(mirror_joints) if len(mirror_joints) > 0 else 0
     return reward
+
+
+"""
+Skateboard-specific rewards.
+"""
+
+
+def robot_skateboard_alignment(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+) -> torch.Tensor:
+    """Reward robot for staying centered on skateboard (horizontal alignment).
+    
+    Uses exponential reward based on XY distance between robot base and skateboard center.
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    skateboard: RigidObject = env.scene[skateboard_cfg.name]
+    
+    # Calculate XY distance between robot and skateboard
+    pos_diff = robot.data.root_pos_w[:, :2] - skateboard.data.root_pos_w[:, :2]
+    distance = torch.norm(pos_diff, dim=-1)
+    
+    # Exponential reward - decreases as robot moves away from skateboard center
+    return torch.exp(-10.0 * distance)
+
+
+def skateboard_orientation(
+    env: ManagerBasedRLEnv,
+    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+) -> torch.Tensor:
+    """Reward skateboard for staying level (flat orientation).
+    
+    Checks that the skateboard's projected gravity points downward.
+    Useful for moving skateboard scenarios.
+    """
+    skateboard: RigidObject = env.scene[skateboard_cfg.name]
+    
+    # Projected gravity should point down (0, 0, -1) when skateboard is level
+    # We want projected_gravity_b[:, 2] to be close to -1
+    gravity_error = torch.square(1.0 + skateboard.data.projected_gravity_b[:, 2])
+    return torch.exp(-5.0 * gravity_error)
+
+
+def feet_on_skateboard(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+    threshold: float = 0.05,
+) -> torch.Tensor:
+    """Reward robot feet for being on/near the skateboard surface.
+    
+    Checks vertical distance between feet and skateboard top surface.
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    skateboard: RigidObject = env.scene[skateboard_cfg.name]
+    
+    # Get feet positions
+    feet_pos = robot.data.body_pos_w[:, robot_cfg.body_ids, :]
+    
+    # Calculate vertical distance from skateboard top surface
+    # Assuming skateboard top is at skateboard.z + small offset
+    skateboard_top_z = skateboard.data.root_pos_w[:, 2].unsqueeze(1)
+    feet_z = feet_pos[:, :, 2]
+    
+    # Distance of feet from skateboard top
+    z_distance = torch.abs(feet_z - skateboard_top_z)
+    
+    # Reward feet close to skateboard surface
+    reward = torch.sum(torch.exp(-10.0 * z_distance), dim=-1)
+    
+    # Also check XY alignment - feet should be within skateboard bounds
+    feet_xy = feet_pos[:, :, :2]
+    skateboard_xy = skateboard.data.root_pos_w[:, :2].unsqueeze(1)
+    xy_distance = torch.norm(feet_xy - skateboard_xy, dim=-1)
+    
+    # Penalize if feet are far from skateboard horizontally
+    xy_reward = torch.sum(torch.exp(-5.0 * xy_distance), dim=-1)
+    
+    return (reward + xy_reward) / (2.0 * len(robot_cfg.body_ids))
+
+
+def robot_skateboard_contact(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Reward for robot feet maintaining contact with skateboard.
+    
+    Uses contact sensor to detect when feet are touching the skateboard.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    
+    # Check if feet bodies are in contact
+    is_contact = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids] > 0
+    
+    # Reward having both feet in contact
+    num_feet_in_contact = torch.sum(is_contact.float(), dim=-1)
+    
+    return num_feet_in_contact / len(sensor_cfg.body_ids)
