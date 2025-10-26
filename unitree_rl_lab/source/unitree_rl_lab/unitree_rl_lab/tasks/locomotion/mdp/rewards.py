@@ -59,6 +59,7 @@ __all__ = [
     "com_within_support_polygon",
     "com_over_skateboard",
     "time_survived",
+    "feet_flat_on_skateboard",
 ]
 
 """
@@ -454,51 +455,46 @@ def feet_off_centerline_penalty(
     max_distance: float = 0.15,
 ) -> torch.Tensor:
     """Penalty for feet being far from the skateboard centerline.
-    
+
     Returns penalty value between 0 (on centerline, no penalty) and 1 (far from centerline, max penalty).
     This is the inverse of feet_near_skateboard_centerline - designed for use with negative weight.
-    
-    Args:
-        env: The environment.
-        robot_cfg: Robot body configuration (feet).
-        skateboard_cfg: Skateboard configuration.
-        max_distance: Distance scale for exponential decay (meters). Default 0.15m.
-        
-    Returns:
-        Penalty tensor (num_envs,) with values between 0 (good) and 1 (bad).
     """
     # Get assets
     robot: Articulation = env.scene[robot_cfg.name]
     skateboard: Articulation = env.scene[skateboard_cfg.name]
+
+    # Get ankle/heel positions (world frame) - This is our reference point
+    ankle_pos_w = robot.data.body_pos_w[:, robot_cfg.body_ids, :]  # (num_envs, num_feet, 3)
     
-    # Foot positions (world frame)
-    foot_pos_w = robot.data.body_pos_w[:, robot_cfg.body_ids, :]  # (num_envs, num_feet, 3)
-    
+    # For simplicity, use ankle position directly (no need to offset to true foot center)
+    # The ankle position should be close enough for centerline calculation
+    foot_pos_w = ankle_pos_w  # (num_envs, num_feet, 3)
+
     # Skateboard center (world frame)
     skateboard_pos_w = skateboard.data.root_pos_w  # (num_envs, 3)
-    
+
     # Get skateboard's forward direction (long axis) in world frame
     if len(robot_cfg.body_ids) >= 2:
+        # Use vector between feet
         foot_vec = foot_pos_w[:, 1, :2] - foot_pos_w[:, 0, :2]
         foot_vec_norm = torch.norm(foot_vec, dim=-1, keepdim=True) + 1e-6
         forward_xy = foot_vec / foot_vec_norm
     else:
         forward_xy = torch.tensor([[1.0, 0.0]], device=env.device).repeat(env.num_envs, 1)
-    
+
     # Compute perpendicular distance to centerline
     foot_to_skateboard = foot_pos_w[..., :2] - skateboard_pos_w[:, None, :2]
     parallel_distance = torch.sum(foot_to_skateboard * forward_xy[:, None, :], dim=-1)
     parallel_vec = parallel_distance.unsqueeze(-1) * forward_xy[:, None, :]
     perpendicular_vec = foot_to_skateboard - parallel_vec
     perpendicular_distance = torch.norm(perpendicular_vec, dim=-1)
-    
+
     # Average distance
     avg_distance = torch.mean(perpendicular_distance, dim=-1)
-    
+
     # Return penalty: 0 when on centerline, increases as feet move away
-    # Inverted from reward version: penalty = 1 - exp(-distance)
     penalty = 1.0 - torch.exp(-avg_distance / max_distance)
-    
+
     return penalty
 
 
@@ -634,3 +630,75 @@ def time_survived(env: ManagerBasedRLEnv) -> torch.Tensor:
         Constant reward tensor of ones with shape (num_envs,).
     """
     return torch.ones(env.num_envs, device=env.device)
+
+
+def feet_flat_on_skateboard(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+    threshold_angle: float = 0.2,
+) -> torch.Tensor:
+    """Reward for keeping feet flat on the skateboard surface.
+    
+    Measures the angle between the foot's orientation and the skateboard's orientation.
+    Feet should be flat (parallel) to the skateboard for stable balance.
+    
+    For skateboarding, flat feet are crucial because:
+    - They maximize contact area with the board
+    - They provide better stability and balance
+    - They prevent sliding off due to poor surface contact
+    
+    Args:
+        env: The environment.
+        robot_cfg: Robot foot body configuration (ankles).
+        skateboard_cfg: Skateboard configuration.
+        threshold_angle: Maximum deviation angle (radians) before penalty. Default 0.2 (~11°).
+        
+    Returns:
+        Reward tensor (num_envs,) with values between 0 (feet not flat) and 1 (feet perfectly flat).
+    """
+    # Get assets
+    robot: Articulation = env.scene[robot_cfg.name]
+    skateboard: Articulation = env.scene[skateboard_cfg.name]
+    
+    # Get foot body orientations (quaternions) in world frame
+    foot_quats = robot.data.body_quat_w[:, robot_cfg.body_ids, :]  # (num_envs, num_feet, 4)
+    
+    # Get skateboard orientation in world frame
+    skateboard_quat = skateboard.data.root_quat_w  # (num_envs, 4)
+    
+    # Calculate angle between quaternions using relative orientation
+    # We'll use the angle between the up vectors (Z-axis) in each frame
+    # Simplified approach: measure how different the orientations are
+    
+    # Expand skateboard quat to match foot quats shape
+    skateboard_quat_expanded = skateboard_quat.unsqueeze(1).expand(-1, foot_quats.shape[1], -1)  # (num_envs, num_feet, 4)
+    
+    # Calculate relative orientation (foot relative to skateboard)
+    # For quaternions: q_relative = q_skateboard^(-1) * q_foot
+    # Simplified: we measure the angle between the orientations
+    # Using the angle extracted from the relative quaternion
+    q_foot = foot_quats  # (num_envs, num_feet, 4)
+    q_board = skateboard_quat_expanded  # (num_envs, num_feet, 4)
+    
+    # Extract quaternion components
+    # For q1 and q2, the angle between them is: 2 * arccos(|q1 · q2|)
+    # where · is dot product
+    dot_products = torch.sum(q_foot * q_board, dim=-1)  # (num_envs, num_feet)
+    dot_products = torch.clamp(dot_products, -1.0, 1.0)
+    
+    # Calculate orientation difference angle
+    # Use absolute value to get shortest rotation path
+    angles = 2.0 * torch.acos(torch.abs(dot_products))  # (num_envs, num_feet)
+    
+    # Average angle across all feet
+    avg_angle = torch.mean(angles, dim=-1)  # (num_envs,)
+    
+    # Reward: exponential decay based on how close to 0° (perfectly aligned)
+    # Returns 1.0 when angle=0, decays toward 0 as angle increases
+    reward = torch.exp(-avg_angle / threshold_angle)  # (num_envs,)
+    
+    return reward
+
+
+    

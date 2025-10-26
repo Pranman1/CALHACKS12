@@ -39,6 +39,7 @@ from unitree_rl_lab.tasks.locomotion.mdp.rewards import (
     feet_contact_without_cmd,
     feet_stumble,
     upward,  # We are replacing this, but the import is harmless
+    feet_flat_on_skateboard,
 )
 from unitree_rl_lab.tasks.locomotion.mdp.terminations import (
     robot_off_skateboard,
@@ -409,7 +410,7 @@ class RewardsCfg:
     # -- feet contact rewards
     feet_contact_still = RewTerm(
         func=feet_contact_without_cmd,
-        weight=5.0,  # Reward feet contact when robot is stationary
+        weight=20.0,  # Reward feet contact when robot is stationary
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
             "command_name": "base_velocity",
@@ -426,7 +427,7 @@ class RewardsCfg:
     # -- skateboard-specific rewards
     robot_on_skateboard = RewTerm(
         func=robot_skateboard_alignment,
-        weight=10.0,  # Increased from 5.0
+        weight=10.0,  # Keep robot centered on skateboard
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "skateboard_cfg": SceneEntityCfg("skateboard"),
@@ -434,15 +435,31 @@ class RewardsCfg:
     )
     feet_on_skateboard = RewTerm(
         func=feet_on_skateboard,
-        weight=5.0,  # Increased from 2.0
+        weight=20.0,  # Keep feet on skateboard surface
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
             "skateboard_cfg": SceneEntityCfg("skateboard"),
         },
     )
+    feet_flatness = RewTerm(
+        func=feet_flat_on_skateboard,
+        weight=80.0,  # Reward for keeping feet flat on the board
+        params={
+            "robot_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+            "skateboard_cfg": SceneEntityCfg("skateboard"),
+            "threshold_angle": 0.2,  # ~11 degrees tolerance
+        },
+    )
+    feet_skateboard_contact = RewTerm(
+        func=robot_skateboard_contact,
+        weight=15.0,  # Reward feet maintaining contact with skateboard
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
+        },
+    )
     feet_centerline = RewTerm(
         func=feet_off_centerline_penalty,
-        weight=-15.0,  # CHANGED: Was 5.0. This is now a strong PENALTY.
+        weight=-5.0,  # Small penalty for being off centerline
         params={
             "robot_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
             "skateboard_cfg": SceneEntityCfg("skateboard"),
@@ -479,16 +496,16 @@ class TerminationsCfg:
     # base_height = DoneTerm(func=mdp.root_height_below_minimum, params={"minimum_height": 0.4})
     bad_orientation = DoneTerm(func=mdp.bad_orientation, params={"limit_angle": 1.5})
     
-    # TERMINATE IMMEDIATELY if robot feet touch the ground!
+    # TERMINATE IMMEDIATELY if ANY robot body part touches the ground!
     # Combines contact detection + height check to differentiate skateboard vs ground
-    # Feet on skateboard (~0.08-0.12m) = OK, feet below 0.08m with contact = TERMINATE
+    # Body on skateboard (~0.08-0.12m) = OK, body below 0.08m with contact = TERMINATE
     body_ground_collision = DoneTerm(
         func=robot_ground_contact,
         params={
-            "robot_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
+            "robot_cfg": SceneEntityCfg("robot", body_names=".*"),  # Check ALL body parts
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*"),  # Monitor ALL body parts
             "threshold": 1.0,  # 1N force threshold for contact detection
-            "ground_height": 0.04,  # Below 0.08m = ground (skateboard top is ~0.08m)
+            "ground_height": 0.06,  # Below 0.08m = ground (skateboard top is ~0.08m)
         },
     )
 
