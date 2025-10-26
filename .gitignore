@@ -1,0 +1,16 @@
+# Logs and outputs - should not be committed
+logs/
+outputs/
+
+# Model files
+*.pt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
