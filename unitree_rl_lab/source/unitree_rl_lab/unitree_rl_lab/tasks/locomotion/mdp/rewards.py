@@ -55,7 +55,10 @@ __all__ = [
     "feet_on_skateboard",
     "robot_skateboard_contact",
     "feet_near_skateboard_centerline",
+    "feet_off_centerline_penalty",
     "com_within_support_polygon",
+    "com_over_skateboard",
+    "time_survived",
 ]
 
 """
@@ -191,9 +194,15 @@ def feet_contact_without_cmd(
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     is_contact = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids] > 0
 
-    command_norm = torch.norm(env.command_manager.get_command(command_name), dim=1)
-    reward = torch.sum(is_contact, dim=-1).float()
-    return reward * (command_norm < 0.1)
+    # Check if command exists, if not assume robot is stationary (always reward contact)
+    try:
+        command_norm = torch.norm(env.command_manager.get_command(command_name), dim=1)
+        reward = torch.sum(is_contact, dim=-1).float()
+        return reward * (command_norm < 0.1)
+    except KeyError:
+        # No command manager configured - assume robot is stationary, always reward contact
+        reward = torch.sum(is_contact, dim=-1).float()
+        return reward
 
 
 def air_time_variance_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -376,59 +385,47 @@ def feet_near_skateboard_centerline(
 ) -> torch.Tensor:
     """Reward feet being near the centerline of the skateboard (along long axis).
     
-    Computes perpendicular distance from each foot to the skateboard's centerline
-    (the line running along its length). This encourages proper stance with feet
-    centered on the board width, preventing tipping left/right.
+    Computes perpendicular distance from each foot center to the skateboard's lengthwise 
+    centerline (the line running along the skateboard's length). This encourages proper 
+    stance with feet centered on the board width, preventing tipping left/right.
     
-    The skateboard can rotate, so we use its actual orientation to compute the
-    centerline direction in world frame.
-    
-    Uses exponential decay: reward = exp(-perpendicular_distance / max_distance)
-    - Feet on centerline = max reward (1.0)
-    - Feet at max_distance = ~0.37 reward
-    - Feet far from centerline = minimal reward
+    Returns value between 0 (feet far from centerline) and 1 (feet on centerline).
+    Uses exponential decay: reward = exp(-average_deviation / max_distance)
     
     Args:
         env: The environment.
         robot_cfg: Robot body configuration (feet).
         skateboard_cfg: Skateboard configuration.
-        max_distance: Perpendicular distance at which reward decays to ~37% (meters).
+        max_distance: Distance scale for exponential decay (meters). Default 0.15m.
         
     Returns:
-        Reward tensor (num_envs,) with exponential decay based on perpendicular distance.
+        Reward tensor (num_envs,) with values between 0 and 1.
     """
     # Get assets
     robot: Articulation = env.scene[robot_cfg.name]
     skateboard: Articulation = env.scene[skateboard_cfg.name]
     
-    # Get foot bodies
-    foot_ids, _ = robot_cfg.body_ids_with_body_names[0]
-    
     # Foot positions (world frame)
-    foot_pos_w = robot.data.body_pos_w[:, foot_ids, :]  # (num_envs, num_feet, 3)
+    foot_pos_w = robot.data.body_pos_w[:, robot_cfg.body_ids, :]  # (num_envs, num_feet, 3)
     
-    # Skateboard center and orientation (world frame)
+    # Skateboard center (world frame)
     skateboard_pos_w = skateboard.data.root_pos_w  # (num_envs, 3)
-    skateboard_quat_w = skateboard.data.root_quat_w  # (num_envs, 4) - (w, x, y, z)
     
     # Get skateboard's forward direction (long axis) in world frame
-    # Assuming the skateboard's local X-axis is the long axis
-    # Forward vector in local frame: [1, 0, 0]
-    forward_local = torch.tensor([1.0, 0.0, 0.0], device=env.device).repeat(env.num_envs, 1)  # (num_envs, 3)
-    
-    # Rotate forward vector to world frame using quaternion
-    forward_w = quat_rotate_vector(skateboard_quat_w, forward_local)  # (num_envs, 3)
+    # Simple approximation: use the vector between the two feet as the long axis
+    if len(robot_cfg.body_ids) >= 2:
+        foot_vec = foot_pos_w[:, 1, :2] - foot_pos_w[:, 0, :2]  # (num_envs, 2) - vector between feet
+        foot_vec_norm = torch.norm(foot_vec, dim=-1, keepdim=True) + 1e-6
+        forward_xy = foot_vec / foot_vec_norm  # Normalized direction
+    else:
+        # Fallback: assume skateboard aligned with X-axis
+        forward_xy = torch.tensor([[1.0, 0.0]], device=env.device).repeat(env.num_envs, 1)
     
     # For each foot, compute perpendicular distance to centerline
     # Vector from skateboard center to foot (XY plane only)
     foot_to_skateboard = foot_pos_w[..., :2] - skateboard_pos_w[:, None, :2]  # (num_envs, num_feet, 2)
     
-    # Skateboard forward direction (XY plane only, normalized)
-    forward_xy = forward_w[:, :2]  # (num_envs, 2)
-    forward_xy = forward_xy / (torch.norm(forward_xy, dim=-1, keepdim=True) + 1e-6)  # Normalize
-    
     # Project foot_to_skateboard onto forward direction (parallel component)
-    # parallel_distance = dot(foot_to_skateboard, forward_xy)
     parallel_distance = torch.sum(
         foot_to_skateboard * forward_xy[:, None, :], dim=-1
     )  # (num_envs, num_feet)
@@ -440,11 +437,69 @@ def feet_near_skateboard_centerline(
     perpendicular_vec = foot_to_skateboard - parallel_vec  # (num_envs, num_feet, 2)
     perpendicular_distance = torch.norm(perpendicular_vec, dim=-1)  # (num_envs, num_feet)
     
-    # Exponential decay reward based on perpendicular distance
-    reward_per_foot = torch.exp(-perpendicular_distance / max_distance)  # (num_envs, num_feet)
+    # Average perpendicular distance across both feet
+    avg_distance = torch.mean(perpendicular_distance, dim=-1)  # (num_envs,)
     
-    # Average over both feet
-    return torch.mean(reward_per_foot, dim=-1)  # (num_envs,)
+    # Exponential decay reward: 1.0 when on centerline, decays as feet move away
+    # Returns values between 0 and 1
+    reward = torch.exp(-avg_distance / max_distance)  # (num_envs,)
+    
+    return reward
+
+
+def feet_off_centerline_penalty(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+    max_distance: float = 0.15,
+) -> torch.Tensor:
+    """Penalty for feet being far from the skateboard centerline.
+    
+    Returns penalty value between 0 (on centerline, no penalty) and 1 (far from centerline, max penalty).
+    This is the inverse of feet_near_skateboard_centerline - designed for use with negative weight.
+    
+    Args:
+        env: The environment.
+        robot_cfg: Robot body configuration (feet).
+        skateboard_cfg: Skateboard configuration.
+        max_distance: Distance scale for exponential decay (meters). Default 0.15m.
+        
+    Returns:
+        Penalty tensor (num_envs,) with values between 0 (good) and 1 (bad).
+    """
+    # Get assets
+    robot: Articulation = env.scene[robot_cfg.name]
+    skateboard: Articulation = env.scene[skateboard_cfg.name]
+    
+    # Foot positions (world frame)
+    foot_pos_w = robot.data.body_pos_w[:, robot_cfg.body_ids, :]  # (num_envs, num_feet, 3)
+    
+    # Skateboard center (world frame)
+    skateboard_pos_w = skateboard.data.root_pos_w  # (num_envs, 3)
+    
+    # Get skateboard's forward direction (long axis) in world frame
+    if len(robot_cfg.body_ids) >= 2:
+        foot_vec = foot_pos_w[:, 1, :2] - foot_pos_w[:, 0, :2]
+        foot_vec_norm = torch.norm(foot_vec, dim=-1, keepdim=True) + 1e-6
+        forward_xy = foot_vec / foot_vec_norm
+    else:
+        forward_xy = torch.tensor([[1.0, 0.0]], device=env.device).repeat(env.num_envs, 1)
+    
+    # Compute perpendicular distance to centerline
+    foot_to_skateboard = foot_pos_w[..., :2] - skateboard_pos_w[:, None, :2]
+    parallel_distance = torch.sum(foot_to_skateboard * forward_xy[:, None, :], dim=-1)
+    parallel_vec = parallel_distance.unsqueeze(-1) * forward_xy[:, None, :]
+    perpendicular_vec = foot_to_skateboard - parallel_vec
+    perpendicular_distance = torch.norm(perpendicular_vec, dim=-1)
+    
+    # Average distance
+    avg_distance = torch.mean(perpendicular_distance, dim=-1)
+    
+    # Return penalty: 0 when on centerline, increases as feet move away
+    # Inverted from reward version: penalty = 1 - exp(-distance)
+    penalty = 1.0 - torch.exp(-avg_distance / max_distance)
+    
+    return penalty
 
 
 def com_within_support_polygon(
@@ -477,14 +532,11 @@ def com_within_support_polygon(
     # Get assets
     robot: Articulation = env.scene[robot_cfg.name]
     
-    # Get foot bodies
-    foot_ids, _ = feet_cfg.body_ids_with_body_names[0]
-    
     # Center of mass position (world frame, XY only)
     com_pos_w = robot.data.root_pos_w[:, :2]  # (num_envs, 2) - using base as proxy for CoM
     
     # Foot positions (world frame, XY only)
-    feet_pos_w = robot.data.body_pos_w[:, foot_ids, :2]  # (num_envs, num_feet, 2)
+    feet_pos_w = robot.data.body_pos_w[:, feet_cfg.body_ids, :2]  # (num_envs, num_feet, 2)
     
     # Compute support polygon boundaries
     # For 2 feet, support polygon is a line segment between the feet
@@ -528,3 +580,57 @@ def com_within_support_polygon(
     reward = torch.exp(-total_dist / margin)  # (num_envs,)
     
     return reward
+
+
+def com_over_skateboard(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    skateboard_cfg: SceneEntityCfg = SceneEntityCfg("skateboard"),
+    margin: float = 0.1,
+) -> torch.Tensor:
+    """Reward for keeping the robot's center of mass (CoM) projection over the skateboard.
+    
+    This ensures the robot's weight is distributed over the skateboard surface,
+    not leaning off to the sides. Critical for skateboarding balance!
+    
+    Args:
+        env: The environment.
+        robot_cfg: Robot configuration (for CoM).
+        skateboard_cfg: Skateboard configuration.
+        margin: Tolerance distance from skateboard center (meters).
+        
+    Returns:
+        Reward tensor (num_envs,) - high when CoM is over skateboard.
+    """
+    # Get assets
+    robot: Articulation = env.scene[robot_cfg.name]
+    skateboard: Articulation = env.scene[skateboard_cfg.name]
+    
+    # Center of mass position (world frame, XY only)
+    com_pos_xy = robot.data.root_pos_w[:, :2]  # (num_envs, 2) - using base as proxy for CoM
+    
+    # Skateboard center position (world frame, XY only)
+    skateboard_pos_xy = skateboard.data.root_pos_w[:, :2]  # (num_envs, 2)
+    
+    # Distance from CoM to skateboard center (XY plane)
+    distance = torch.norm(com_pos_xy - skateboard_pos_xy, dim=-1)  # (num_envs,)
+    
+    # Exponential decay reward - high when close to skateboard center
+    reward = torch.exp(-distance / margin)  # (num_envs,)
+    
+    return reward
+
+
+def time_survived(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Reward for each timestep the robot survives/stays balanced.
+    
+    This is a simple constant reward per step that encourages the robot to stay
+    balanced on the skateboard as long as possible.
+    
+    Args:
+        env: The environment.
+    
+    Returns:
+        Constant reward tensor of ones with shape (num_envs,).
+    """
+    return torch.ones(env.num_envs, device=env.device)

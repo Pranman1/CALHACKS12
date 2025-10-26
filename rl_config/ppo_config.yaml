@@ -1,0 +1,51 @@
+# PPO Configuration for Quick Training
+# Optimized for fast convergence on skateboard balancing task
+
+# Algorithm settings
+algorithm:
+  name: "PPO"
+  
+# Policy network settings
+policy:
+  init_noise_std: 1.0
+  actor_hidden_dims: [512, 256, 128]  # Smaller network for faster training
+  critic_hidden_dims: [512, 256, 128]
+  
+# Training settings - optimized for speed
+train:
+  # Reduced training iterations for quick testing
+  num_learning_epochs: 4  # Reduced from default 5
+  num_ppo_epochs: 4       # Reduced from default 5
+  
+  # Smaller batch sizes for faster updates
+  mini_batch_size: 512    # Reduced from default 1024
+  batch_size: 16384       # Reduced from default 32768
+  
+  # Learning rates - slightly higher for faster convergence
+  learning_rate: 3e-4     # Standard PPO learning rate
+  
+  # PPO specific parameters
+  gamma: 0.99
+  lam: 0.95
+  clip_range: 0.2
+  value_loss_coef: 1.0
+  entropy_coef: 0.01
+  max_grad_norm: 1.0
+  
+  # Logging and checkpointing
+  save_interval: 100      # Save every 100 iterations
+  log_interval: 10        # Log every 10 iterations
+  
+  # Early stopping for quick testing
+  max_iterations: 1000     # Reduced for quick testing
+  
+# Environment settings
+env:
+  num_envs: 8192          # Match the environment config
+  episode_length: 500     # 5 seconds * 100 Hz = 500 steps
+  
+# Device settings
+device: "cuda:0"          # Use GPU if available
+
+# Random seed
+seed: 42

@@ -70,3 +70,4 @@ datasets
 *.mtl
 *.STL
 **/env.yaml
+**logs/
